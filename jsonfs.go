@@ -32,14 +32,14 @@ which I think will be a longer term benefit.
 
 In our unmarshal, we are about 21x the speed with a 17x reduction in allocations.
 
-// # Important notes
+# Important notes
 
 - This doesn't support numbers larger than an Int64. If you need that, you need to use a string.
 - This doesn't support anything other than decimal notation, but the JSON standard does. If someone needs it I'll add it.
 - This does not have []byte conversion to string as the standard lib provides.
 - There are likely bugs.
 
-// # Examples
+# Examples
 
 Example of unmarshalling a JSON file:
 
