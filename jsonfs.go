@@ -54,7 +54,7 @@ Example of unmarshalling a JSON file:
 
 Example of creating a JSON object via the library:
 
-	obj := MustNewDir(
+	dir := MustNewDir(
 		"",
 		MustNewFile("First Name", "John"),
 		MustNewFile("Last Name", "Doak"),
@@ -62,7 +62,7 @@ Example of creating a JSON object via the library:
 			"Identities",
 			MustNewFile("EmployeeID", 10),
 			MustNewFile("SSNumber", "999-99-9999"),
-		)
+		),
 	)
 
 Example of marshaling a Directory:
@@ -73,7 +73,7 @@ Example of marshaling a Directory:
 	}
 	defer f.Close()
 
-	if err := MarshalJSON(f, obj); err != nil {
+	if err := MarshalJSON(f, dir); err != nil {
 		// Do something
 	}
 
@@ -121,6 +121,7 @@ Get a value from a Directory when zero values will do if set to null or doesn't 
 
 Put the value in an fs.FS and walk the JSON:
 
+	// Note: this example can be found in examples/dirwalk
 	fsys := NewFSFromDir(dir)
 
 	fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
@@ -130,10 +131,10 @@ Put the value in an fs.FS and walk the JSON:
 		p = path.Clean(p)
 
 		switch x := d.(type) {
-		case File:
-			fmt.Printf("%s:%s:%v", p, x.Type(), x.Any())
-		case Directory:
-			fmt.Printf("%s:%s:%v", p)
+		case jsonfs.File:
+			fmt.Printf("%s:%s:%v\n", p, x.JSONType(), x.Any())
+		case jsonfs.Directory:
+			fmt.Printf("%s/\n", p)
 		}
 		return nil
 	})
@@ -231,6 +232,9 @@ func NewFile(name string, value any) (File, error) {
 		t = FTInt
 		b = unsafeGetBytes(strconv.FormatInt(int64(x), 10))
 	case int64:
+		t = FTInt
+		b = unsafeGetBytes(strconv.FormatInt(int64(x), 10))
+	case int:
 		t = FTInt
 		b = unsafeGetBytes(strconv.FormatInt(int64(x), 10))
 	case float32:
@@ -994,9 +998,15 @@ func NewFSFromDir(dir Directory) *FS {
 
 // Open implements fs.FS.Open().
 func (f *FS) Open(name string) (fs.File, error) {
+	//log.Printf("Open(%s)", name)
 	name = strings.TrimPrefix(path.Clean(name), "/")
 	if !fs.ValidPath(name) {
 		return File{}, fmt.Errorf("invalid name for a path as reported by fs.ValidPath()")
+	}
+
+	d := f.root
+	if name == "." {
+		return d, nil
 	}
 
 	p := strings.Split(name, "/")
@@ -1004,7 +1014,6 @@ func (f *FS) Open(name string) (fs.File, error) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("path is invalid")}
 	}
 
-	d := f.root
 	for i := 0; i < len(p)-1; i++ {
 		v, ok := d.dirs[p[i]]
 		if !ok {
