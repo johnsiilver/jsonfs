@@ -20,7 +20,7 @@ func main() {
 			jsonfs.MustNewFile("SSNumber", "999-99-9999"),
 		),
 	)
-	fsys := jsonfs.NewFSFromDir(dir)
+	fsys := jsonfs.NewMemFS(dir)
 
 	fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {

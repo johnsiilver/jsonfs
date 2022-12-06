@@ -7,17 +7,10 @@ import (
 	"io"
 	"reflect"
 	"strconv"
-	"sync"
 	"time"
 	"unicode"
 	"unsafe"
 )
-
-var bufferPool = sync.Pool{
-	New: func() any {
-		return bufio.NewReader(nil)
-	},
-}
 
 const (
 	doubleQuote  = '"'
@@ -42,17 +35,20 @@ func UnmarshalJSON(r io.Reader) (Directory, error) {
 	if _, ok := r.(*bufio.Reader); ok {
 		b = r.(*bufio.Reader)
 	} else {
-		b = bufferPool.Get().(*bufio.Reader)
+		b = readerPool.Get().(*bufio.Reader)
 		b.Reset(r)
 	}
-	defer func() { bufferPool.Put(b) }()
+	defer func() { readerPool.Put(b) }()
 
-	m := newMessage(b, "")
-	runSM(context.Background(), m.start)
-	if m.err != nil {
-		return Directory{}, m.err
+	m := dictPool.Get()
+	m.V.reset(b, "")
+	defer m.Close()
+
+	runSM(context.Background(), m.V.start)
+	if m.V.err != nil {
+		return Directory{}, m.V.err
 	}
-	return m.dir, nil
+	return m.V.dir, nil
 }
 
 // Stream is a stream object from UnmarshalStream().
@@ -70,7 +66,7 @@ func UnmarshalStream(ctx context.Context, r io.Reader) chan Stream {
 	if _, ok := r.(*bufio.Reader); ok {
 		b = r.(*bufio.Reader)
 	} else {
-		b = bufferPool.Get().(*bufio.Reader)
+		b = readerPool.Get().(*bufio.Reader)
 		b.Reset(r)
 	}
 	ch := make(chan Stream, 1)
@@ -104,8 +100,8 @@ func runSM(ctx context.Context, start stateFn) {
 	}
 }
 
-// messageSM handles JSON objects.
-type messageSM struct {
+// dictSM handles JSON objects.
+type dictSM struct {
 	b         *bufio.Reader
 	dir       Directory
 	modTime   time.Time
@@ -113,23 +109,30 @@ type messageSM struct {
 	err       error
 }
 
-// newMessage creates a new messageSM statemachine.
-func newMessage(b *bufio.Reader, dirName string) messageSM {
-	return messageSM{
+// newDictSM creates a new dictSM statemachine.
+func newDictSM(b *bufio.Reader, dirName string) *dictSM {
+	return &dictSM{
 		b:   b,
 		dir: newDir(dirName, time.Time{}), // Directory.modTime set in start()
 	}
 }
 
-// start is the entry way into the messageSm.
-func (m *messageSM) start(ctx context.Context) stateFn {
-	m.modTime = time.Now()
-	m.dir.modTime = m.modTime
-	return m.open
+func (m *dictSM) reset(b *bufio.Reader, dirName string) {
+	m.valueName = ""
+	m.err = nil
+	m.b = b
+	m.dir = newDir(dirName, time.Time{})
 }
 
-// open handles the open bracce.
-func (m *messageSM) open(ctx context.Context) stateFn {
+// start is the entry way into the messageSm.
+func (m *dictSM) start(ctx context.Context) stateFn {
+	m.modTime = time.Now()
+	m.dir.modTime = m.modTime
+	return m.openBrace
+}
+
+// openBrace handles the open brace.
+func (m *dictSM) openBrace(ctx context.Context) stateFn {
 	skipSpace(m.b)
 
 	r, _, err := m.b.ReadRune()
@@ -153,6 +156,7 @@ func (m *messageSM) open(ctx context.Context) stateFn {
 		return nil
 	}
 	if rune(b[0]) == '}' {
+		m.b.ReadRune()
 		return nil
 	}
 
@@ -160,7 +164,7 @@ func (m *messageSM) open(ctx context.Context) stateFn {
 }
 
 // parseKey parses an object key.
-func (m *messageSM) parseKey(ctx context.Context) stateFn {
+func (m *dictSM) parseKey(ctx context.Context) stateFn {
 	skipSpace(m.b)
 
 	r, _, err := m.b.ReadRune()
@@ -174,18 +178,18 @@ func (m *messageSM) parseKey(ctx context.Context) stateFn {
 		return nil
 	}
 	m.b.UnreadRune()
-	s, err := getString(m.b)
+	s, err := getString(m.b, true)
 	if err != nil {
 		m.err = err
 		return nil
 	}
-	m.valueName = byteSlice2String(s)
+	m.valueName = ByteSlice2String(s)
 
 	return m.colon
 }
 
 // colon parses the colon after an object key.
-func (m *messageSM) colon(ctx context.Context) stateFn {
+func (m *dictSM) colon(ctx context.Context) stateFn {
 	skipSpace(m.b)
 
 	r, _, err := m.b.ReadRune()
@@ -204,7 +208,7 @@ func (m *messageSM) colon(ctx context.Context) stateFn {
 
 // valueCheck tries to determine the value of an object key so that we
 // can go to the next state to handle it.
-func (m *messageSM) valueCheck(ctx context.Context) stateFn {
+func (m *dictSM) valueCheck(ctx context.Context) stateFn {
 	skipSpace(m.b)
 
 	next, err := valueCheck(m.b)
@@ -220,20 +224,30 @@ func (m *messageSM) valueCheck(ctx context.Context) stateFn {
 
 	switch next {
 	case msgNext:
-		nm := newMessage(m.b, m.valueName)
-		runSM(ctx, nm.open)
-		if nm.err != nil {
-			m.err = nm.err
+		nm := dictPool.Get()
+		nm.V.reset(m.b, m.valueName)
+
+		runSM(ctx, nm.V.start)
+		if nm.V.err != nil {
+			m.err = nm.V.err
 			return nil
 		}
 
-		m.dir.dirs[nm.dir.name] = nm.dir
+		m.dir.dirs[nm.V.dir.name] = nm.V.dir
+		nm.Close()
 		return m.commaClose
 	case arrayNext:
-		na := newArray(m.b, m.valueName, m.modTime)
-		runSM(ctx, na.start)
+		na := arrayPool.Get()
+		na.V.reset(m.b, m.valueName, m.modTime)
 
-		m.dir.dirs[na.dir.name] = na.dir
+		runSM(ctx, na.V.start)
+		if na.V.err != nil {
+			m.err = na.V.err
+			return nil
+		}
+
+		m.dir.dirs[na.V.dir.name] = na.V.dir
+		na.Close()
 		return m.commaClose
 	case stringNext:
 		o, err := decodeString(m.b, m.valueName, m.modTime)
@@ -282,7 +296,7 @@ func (m *messageSM) valueCheck(ctx context.Context) stateFn {
 }
 
 // commaClose determines if we have another field in an object or object closure.
-func (m *messageSM) commaClose(ctx context.Context) stateFn {
+func (m *dictSM) commaClose(ctx context.Context) stateFn {
 	skipSpace(m.b)
 
 	x, err := m.b.Peek(1)
@@ -294,7 +308,7 @@ func (m *messageSM) commaClose(ctx context.Context) stateFn {
 
 	switch r {
 	case closeBrace:
-		return m.close
+		return m.braceClose
 	case comma:
 		return m.comma
 	}
@@ -302,8 +316,8 @@ func (m *messageSM) commaClose(ctx context.Context) stateFn {
 	return nil
 }
 
-// close handles a closing brace(}) of an object.
-func (m *messageSM) close(ctx context.Context) stateFn {
+// braceClose handles a closing brace(}) of an object.
+func (m *dictSM) braceClose(ctx context.Context) stateFn {
 	r, _, err := m.b.ReadRune()
 	if err != nil {
 		m.err = err
@@ -318,7 +332,7 @@ func (m *messageSM) close(ctx context.Context) stateFn {
 }
 
 // comma handles a comma after a field value of an object.
-func (m *messageSM) comma(ctx context.Context) stateFn {
+func (m *dictSM) comma(ctx context.Context) stateFn {
 	r, _, err := m.b.ReadRune()
 	if err != nil {
 		m.err = err
@@ -349,6 +363,15 @@ func newArray(b *bufio.Reader, name string, modTime time.Time) *arraySM {
 	return a
 }
 
+func (m *arraySM) reset(b *bufio.Reader, name string, modTime time.Time) {
+	m.b = b
+	m.dir = newDir(name, modTime)
+	m.dir.isArray = true
+	m.modTime = modTime
+	m.item = 0
+	m.err = nil
+}
+
 func (m *arraySM) start(ctx context.Context) stateFn {
 	return m.openBracket
 }
@@ -373,6 +396,7 @@ func (m *arraySM) openBracket(ctx context.Context) stateFn {
 		return nil
 	}
 	if rune(b[0]) == ']' {
+		m.b.ReadRune()
 		return nil
 	}
 
@@ -394,20 +418,30 @@ func (m *arraySM) valueCheck(ctx context.Context) stateFn {
 
 	switch next {
 	case msgNext:
-		nm := newMessage(m.b, strconv.Itoa(m.item))
-		runSM(ctx, nm.start)
-		if nm.err != nil {
-			m.err = nm.err
+		nm := dictPool.Get()
+		nm.V.reset(m.b, strconv.Itoa(m.item))
+
+		runSM(ctx, nm.V.start)
+		if nm.V.err != nil {
+			m.err = nm.V.err
 			return nil
 		}
 
-		m.dir.dirs[nm.dir.name] = nm.dir
+		m.dir.dirs[nm.V.dir.name] = nm.V.dir
+		nm.Close()
 		return m.commaClose
 	case arrayNext:
-		na := newArray(m.b, strconv.Itoa(m.item), m.modTime)
-		runSM(ctx, na.start)
+		na := arrayPool.Get()
+		na.V.reset(m.b, strconv.Itoa(m.item), m.modTime)
 
-		m.dir.dirs[na.dir.name] = na.dir
+		runSM(ctx, na.V.start)
+		if na.V.err != nil {
+			m.err = na.V.err
+			return nil
+		}
+
+		m.dir.dirs[na.V.dir.name] = na.V.dir
+		na.Close()
 		return m.commaClose
 	case stringNext:
 		o, err := decodeString(m.b, valueName, m.modTime)
@@ -566,7 +600,7 @@ func valueCheck(b *bufio.Reader) (next, error) {
 }
 
 func decodeString(b *bufio.Reader, name string, modTime time.Time) (File, error) {
-	s, err := getString(b)
+	s, err := getString(b, true)
 	if err != nil {
 		return File{}, err
 	}
@@ -583,16 +617,16 @@ func decodeString(b *bufio.Reader, name string, modTime time.Time) (File, error)
 func decodeBool(b *bufio.Reader, name string, hint next, modTime time.Time) (File, error) {
 	var buff []byte
 	if hint == trueNext {
-		buff = make([]byte, 4)
+		buff = make([]byte, 4) // escape
 	} else {
-		buff = make([]byte, 5)
+		buff = make([]byte, 5) // escape
 	}
 
-	_, err := b.Read(buff)
+	_, err := io.ReadFull(b, buff)
 	if err != nil {
 		return File{}, fmt.Errorf("decoding bool, but unexpected error: %v", err)
 	}
-	s := byteSlice2String(buff)
+	s := ByteSlice2String(buff)
 	switch {
 	case s == "false":
 		return File{
@@ -614,15 +648,15 @@ func decodeBool(b *bufio.Reader, name string, hint next, modTime time.Time) (Fil
 
 // decodeNull decodes a null value.
 func decodeNull(b *bufio.Reader, name string, modTime time.Time) (File, error) {
-	buff := make([]byte, 0, 4)
+	buff := make([]byte, 4) // escape
 
-	_, err := b.Read(buff)
+	_, err := io.ReadFull(b, buff)
 	if err != nil {
 		return File{}, fmt.Errorf("decoding null, but unexpected error: %v", err)
 	}
 
-	if byteSlice2String(buff) != "null" {
-		return File{}, fmt.Errorf("expected null, found %v", byteSlice2String(buff))
+	if ByteSlice2String(buff) != "null" {
+		return File{}, fmt.Errorf("expected null, found %v", ByteSlice2String(buff))
 	}
 
 	return File{
@@ -636,7 +670,7 @@ func decodeNull(b *bufio.Reader, name string, modTime time.Time) (File, error) {
 // decodeNumber decodes a number value.
 // TODO(jdoak): Doesn't handle the whole E or hex value stuff.
 func decodeNumber(b *bufio.Reader, name string, modTime time.Time) (File, error) {
-	buff := make([]byte, 0, 5)
+	buff := make([]byte, 0, 5) // escape
 	float := false
 	for {
 		r, _, err := b.ReadRune()
@@ -670,17 +704,65 @@ func decodeNumber(b *bufio.Reader, name string, modTime time.Time) (File, error)
 	return o, nil
 }
 
-// getString gets a string from the Reader. The first character is considered
-// to be the quote character. We handle escaping a quote with \.
-func getString(b *bufio.Reader) ([]byte, error) {
-	quote, _, _ := b.ReadRune()
+// getString gets a string from the Reader. If deleteFirst == true, the first
+// character is considered to be the quote character and is removed.
+// We handle escaping a quote with \.
+func getString(b *bufio.Reader, deleteFirst bool) ([]byte, error) {
+	if deleteFirst {
+		if _, _, err := b.ReadRune(); err != nil {
+			return nil, err
+		}
+	}
 
 	s, err := b.ReadBytes('"')
 	if err != nil {
-		return nil, fmt.Errorf("string did not end with %q: %s", quote, err)
+		return nil, fmt.Errorf("string did not end with a double quote: %s", err)
+	}
+
+	if !isQuote(s) {
+		buff, err := getString(b, false)
+		if err != nil {
+			return nil, err
+		}
+		return append(s, buff...), nil
 	}
 
 	return s[:len(s)-1], nil
+}
+
+const backslash = '\\'
+
+func isQuote(b []byte) bool {
+	length := len(b)
+
+	switch length {
+	case 0:
+		return false
+	case 1:
+		return true
+	case 2:
+		if b[0] == backslash {
+			return false
+		}
+		return true
+	}
+
+	//  \\\"
+	//  is \""
+	// \\\\"
+	// is \\"
+	// \\\\\"
+	// is \\""
+	itIs := true
+	for i := length - 2; i >= 0; i-- {
+		if b[i] == backslash {
+			itIs = !itIs
+			continue
+		}
+		break
+	}
+
+	return itIs
 }
 
 func duplicateField(dir Directory, name string) error {

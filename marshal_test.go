@@ -3,11 +3,22 @@ package jsonfs
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/kylelemons/godebug/pretty"
 )
+
+var largeJSON string
+
+func init() {
+	b, err := os.ReadFile("large.json")
+	if err != nil {
+		panic(err)
+	}
+	largeJSON = ByteSlice2String(b)
+}
 
 func TestMarshalJSON(t *testing.T) {
 	d, err := UnmarshalJSON(strings.NewReader(jsonText))
@@ -31,7 +42,7 @@ func TestMarshalJSON(t *testing.T) {
 	}
 }
 
-func BenchmarkMarshalJSON(b *testing.B) {
+func BenchmarkMarshalJSONSmall(b *testing.B) {
 	d, err := UnmarshalJSON(strings.NewReader(jsonText))
 	if err != nil {
 		panic(err)
@@ -50,16 +61,68 @@ func BenchmarkMarshalJSON(b *testing.B) {
 	}
 }
 
-func BenchmarkMarshalJSONStdlib(b *testing.B) {
-	m := map[string]any{}
-	if err := json.Unmarshal([]byte(jsonText), &m); err != nil {
+func BenchmarkMarshalJSONLarge(b *testing.B) {
+	d, err := UnmarshalJSON(strings.NewReader(largeJSON))
+	if err != nil {
 		panic(err)
 	}
+	file := &bytes.Buffer{}
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		if _, err := json.Marshal(m); err != nil {
+		b.StopTimer()
+		file.Reset()
+		b.StartTimer()
+		if err := MarshalJSON(file, d); err != nil {
+			panic(err)
+		}
+	}
+}
+
+func BenchmarkMarshalJSONStdlibSmall(b *testing.B) {
+	m := map[string]any{}
+	if err := json.Unmarshal(UnsafeGetBytes(jsonText), &m); err != nil {
+		panic(err)
+	}
+	file := &bytes.Buffer{}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		file.Reset()
+		b.StartTimer()
+
+		buff, err := json.Marshal(m)
+		if err != nil {
+			panic(err)
+		}
+		if _, err := file.Write(buff); err != nil {
+			panic(err)
+		}
+	}
+}
+
+func BenchmarkMarshalJSONStdlibLarge(b *testing.B) {
+	m := map[string]any{}
+	if err := json.Unmarshal(UnsafeGetBytes(largeJSON), &m); err != nil {
+		panic(err)
+	}
+	file := &bytes.Buffer{}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		file.Reset()
+		b.StartTimer()
+
+		buff, err := json.Marshal(m)
+		if err != nil {
+			panic(err)
+		}
+		if _, err := file.Write(buff); err != nil {
 			panic(err)
 		}
 	}

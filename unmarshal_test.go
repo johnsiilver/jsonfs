@@ -1,12 +1,7 @@
 package jsonfs
 
-/*
-pkg: github.com/johnsiilver/jsonfs
-BenchmarkUnmarshal-10            	 6385500	       169.9 ns/op	     240 B/op	       4 allocs/op
-BenchmarkStandardUnmarshal-10    	  302157	      3931 ns/op	    2672 B/op	      66 allocs/op
-*/
-
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -14,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kylelemons/godebug/pretty"
+	"github.com/nsf/jsondiff"
 )
 
 var jsonText = `
@@ -185,12 +181,74 @@ func TestUnmarshal(t *testing.T) {
 	}
 }
 
-func BenchmarkUnmarshal(b *testing.B) {
-	b.ReportAllocs()
+func TestLargeFile(t *testing.T) {
+	m := map[string]any{}
+	if err := json.Unmarshal(unsafeGetBytes(largeJSON), &m); err != nil {
+		panic(err)
+	}
+
+	r := strings.NewReader(largeJSON)
+	d, err := UnmarshalJSON(r)
+	if err != nil {
+		panic(err)
+	}
+
+	var k int
+	var entry any
+	for k, entry = range m["Data"].([]any) {
+		e := entry.(map[string]any)
+
+		id := e["id"].(string)
+
+		f, err := d.GetFile(fmt.Sprintf("Data/%d/id", k))
+		if err != nil {
+			panic(err)
+		}
+
+		if f.StringOrZV() != id {
+			t.Fatalf("did not equal %s == %s", f.StringOrZV(), id)
+		}
+	}
+
+	f := bytes.Buffer{}
+	if err := MarshalJSON(&f, d); err != nil {
+		panic(err)
+	}
+
+	diff, _ := jsondiff.Compare(UnsafeGetBytes(largeJSON), f.Bytes(), &jsondiff.Options{})
+	if diff != jsondiff.FullMatch {
+		t.Fatalf("TestLargeFile: got diff %v", diff)
+	}
+}
+
+func TestIsQuote(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{`\"`, false},
+		{`\\"`, true},
+		{`\\\"`, false},
+		{`\\\\"`, true},
+	}
+
+	for _, test := range tests {
+		got := isQuote(UnsafeGetBytes(test.input))
+		if got != test.want {
+			t.Errorf("TestIsQuoteOrNot(%s): got %v, want %v", test.input, got, test.want)
+		}
+	}
+}
+
+func BenchmarkUnmarshalSmall(b *testing.B) {
 	r := strings.NewReader(jsonText)
+	b.ReportAllocs()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		r.Reset(jsonText)
+		b.StartTimer()
 		_, err := UnmarshalJSON(r)
 		if err != nil {
 			panic(err)
@@ -198,16 +256,67 @@ func BenchmarkUnmarshal(b *testing.B) {
 	}
 }
 
-func BenchmarkStandardUnmarshal(b *testing.B) {
+func BenchmarkUnmarshalLarge(b *testing.B) {
+	r := strings.NewReader(largeJSON)
+	b.ReportAllocs()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		r.Reset(largeJSON)
+		b.StartTimer()
+
+		_, err := UnmarshalJSON(r)
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
+func BenchmarkStandardUnmarshalSmall(b *testing.B) {
+	r := strings.NewReader(jsonText)
 	b.ReportAllocs()
 
 	m := map[string]any{}
 	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		r.Reset(jsonText)
+		b.StartTimer()
 		if err := json.Unmarshal(unsafeGetBytes(jsonText), &m); err != nil {
 			panic(err)
 		}
 	}
 }
+
+func BenchmarkStandardUnmarshalLarge(b *testing.B) {
+	r := strings.NewReader(largeJSON)
+	b.ReportAllocs()
+
+	m := map[string]any{}
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		r.Reset(largeJSON)
+		b.StartTimer()
+		if err := json.Unmarshal(unsafeGetBytes(largeJSON), &m); err != nil {
+			panic(err)
+		}
+	}
+}
+
+/*
+func BenchmarkStandardUnmarshalDecoderLarge(b *testing.B) {
+	b.ReportAllocs()
+
+	dec := json.NewDecoder()
+
+	m := map[string]any{}
+	for i := 0; i < b.N; i++ {
+		if err := json.Unmarshal(unsafeGetBytes(largeJSON), &m); err != nil {
+			panic(err)
+		}
+	}
+}
+*/
 
 func compareKeys(d Directory, want []string) error {
 	got, err := d.ReadDir(0)

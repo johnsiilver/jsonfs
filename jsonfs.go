@@ -11,33 +11,37 @@ updates.
 
 A File represents a JSON basic value of bool, integer, float, null or string.
 
-A Directory represents a JSON object or array.
+A Directory represents a JSON object or array. Because a directory can be an
+object or array, a directory that represents an array has _.array._ appened to
+the name in some filesystems. If creating an array using filesytem tools,
+use ArrayDirName("name_of_your_array"), which will append the correct suffix.
+You always opened the file with simply the name.  This also means that naming
+an object (not array) _.array._ will cause unexpected results.
 
-This is a thought experiment, but should be both performant and safe to use.
-However, it does have the unattractive nature of being verbose for operations,
-especially when you aren't sure if the value will be set or set to null.
+This is a thought experiment. However, it is quite performant, but does have
+the unattractive nature of being more verbose. Also, you may find problems if
+your JSON dict keys have invalid characters for the filesystem you are
+running on AND you use the diskfs filesystem. For the memfs, this is mostly
+not a problem, except for /. You cannot use / in your keys.
 
 # Benchmarks
 
-Here are the benchmarks comparing the stdlib/json using maps against this
-package:
+We are slower and allocate more memory.  I'm going to have to spend some time
+optimising the memory use. I had some previous benchmarks that showed this
+was faster.  But I had a mistake that became obvious with using a large file,
+(unless I was 700,000x faster on unmarshal, and I'm not that good).
 
-	BenchmarkMarshalJSON-10          	  263043	      4403 ns/op	       0 B/op	       0 allocs/op
-	BenchmarkMarshalJSONStdlib-10    	  365203	      3216 ns/op	    2304 B/op	      51 allocs/op
-	BenchmarkUnmarshal-10            	 6532909	       186.5 ns/op	     256 B/op	       4 allocs/op
-	BenchmarkStandardUnmarshal-10    	  302988	      3922 ns/op	    2672 B/op	      66 allocs/op
-
-In our marshal, we are about 1000 nanoseconds longer. But we are also allocation free,
-which I think will be a longer term benefit.
-
-In our unmarshal, we are about 21x the speed with a 17x reduction in allocations.
+	BenchmarkUnmarshalSmall-10            	  132848	      8384 ns/op	   11185 B/op	     167 allocs/op
+	BenchmarkStandardUnmarshalSmall-10    	  215502	      5484 ns/op	    2672 B/op	      66 allocs/op
+	BenchmarkUnmarshalLarge-10            	       5	 227486309 ns/op	318321257 B/op	 4925295 allocs/op
+	BenchmarkStandardUnmarshalLarge-10    	       6	 185993493 ns/op	99390094 B/op	 1749996 allocs/op
 
 # Important notes
 
-- This doesn't support numbers larger than an Int64. If you need that, you need to use a string.
-- This doesn't support anything other than decimal notation, but the JSON standard does. If someone needs it I'll add it.
-- This does not have []byte conversion to string as the standard lib provides.
-- There are likely bugs.
+  - This doesn't support numbers larger than an Int64. If you need that, you need to use a string.
+  - This doesn't support anything other than decimal notation, but the JSON standard does. If someone needs it I'll add it.
+  - This does not have []byte conversion to string as the standard lib provides.
+  - There are likely bugs in here.
 
 # Examples
 
@@ -142,7 +146,6 @@ Put the value in an fs.FS and walk the JSON:
 package jsonfs
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -153,9 +156,31 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
-	"unsafe"
+
+	gopherfs "github.com/gopherfs/fs"
 )
+
+// FS details the interfaces that a filesytem must have in order to
+// be used by jsonfs purposes. We do not honor filesytems interfaces outside
+// this package at this time.
+type FS interface {
+	fs.FS
+	fs.ReadDirFS
+	fs.ReadFileFS
+	fs.StatFS
+	fs.SubFS
+
+	gopherfs.MkdirAllFS
+	gopherfs.Remove
+	gopherfs.Writer
+}
+
+// DirectoryFS provides methods for reading and writing a Directory to a
+// Filesystem.
+type DirectoryFS interface {
+	// Directory retrieves a Directory from an FS.
+	Directory(path string) (Directory, error)
+}
 
 //go:generate stringer -type=FileType
 
@@ -169,39 +194,6 @@ const (
 	FTFloat  FileType = 3
 	FTString FileType = 4
 )
-
-// fileInfo implements fs.FileInfo.
-type fileInfo struct {
-	name    string
-	size    int64
-	mode    fs.FileMode
-	modTime time.Time
-	isDir   bool
-}
-
-func (f fileInfo) Name() string {
-	return f.name
-}
-
-func (f fileInfo) Size() int64 {
-	return f.size
-}
-
-func (f fileInfo) Mode() fs.FileMode {
-	return f.mode
-}
-
-func (f fileInfo) ModTime() time.Time {
-	return f.modTime
-}
-
-func (f fileInfo) IsDir() bool {
-	return f.isDir
-}
-
-func (f fileInfo) Sys() any {
-	return nil
-}
 
 // File represents a value in JSON. This can be a string, bool or number.
 // All files are readonly.
@@ -224,25 +216,25 @@ func NewFile(name string, value any) (File, error) {
 	switch x := value.(type) {
 	case int8:
 		t = FTInt
-		b = unsafeGetBytes(strconv.FormatInt(int64(x), 10))
+		b = UnsafeGetBytes(strconv.FormatInt(int64(x), 10))
 	case int16:
 		t = FTInt
-		b = unsafeGetBytes(strconv.FormatInt(int64(x), 10))
+		b = UnsafeGetBytes(strconv.FormatInt(int64(x), 10))
 	case int32:
 		t = FTInt
-		b = unsafeGetBytes(strconv.FormatInt(int64(x), 10))
+		b = UnsafeGetBytes(strconv.FormatInt(int64(x), 10))
 	case int64:
 		t = FTInt
-		b = unsafeGetBytes(strconv.FormatInt(int64(x), 10))
+		b = UnsafeGetBytes(strconv.FormatInt(int64(x), 10))
 	case int:
 		t = FTInt
-		b = unsafeGetBytes(strconv.FormatInt(int64(x), 10))
+		b = UnsafeGetBytes(strconv.FormatInt(int64(x), 10))
 	case float32:
 		t = FTFloat
-		b = unsafeGetBytes(strconv.FormatFloat(float64(x), 'f', -1, 32))
+		b = UnsafeGetBytes(strconv.FormatFloat(float64(x), 'f', -1, 32))
 	case float64:
 		t = FTFloat
-		b = unsafeGetBytes(strconv.FormatFloat(float64(x), 'f', -1, 64))
+		b = UnsafeGetBytes(strconv.FormatFloat(float64(x), 'f', -1, 64))
 	case bool:
 		t = FTBool
 		if x {
@@ -254,7 +246,7 @@ func NewFile(name string, value any) (File, error) {
 		t = FTString
 		b = make([]byte, 0, len(x)+2)
 		b = append(b, doubleQuote)
-		b = append(b, unsafeGetBytes(x)...)
+		b = append(b, UnsafeGetBytes(x)...)
 		b = append(b, doubleQuote)
 	case nil:
 		t = FTNull
@@ -284,11 +276,18 @@ func (f File) isFileOrDir() {}
 
 // Stat implements fs.File.Stat().
 func (f File) Stat() (fs.FileInfo, error) {
-	return fileInfo{
+	return f.stat()
+}
+
+// stat is the same as Stat(), but doesn't do an allocation because we
+// are implementing an interface in Stat().
+func (f File) stat() (FileInfo, error) {
+	return FileInfo{
 		name:    f.name,
 		size:    int64(len(f.value)),
 		mode:    0444,
 		modTime: f.modTime,
+		isDir:   false,
 	}, nil
 }
 
@@ -315,7 +314,7 @@ func (f File) JSONType() FileType {
 
 // Info implements fs.DirEntry.Info().
 func (f File) Info() (fs.FileInfo, error) {
-	return f.Stat()
+	return f.stat() // escape
 }
 
 // IsDir implements fs.DirEntry.IsDir().
@@ -338,7 +337,7 @@ func (f File) Bool() (bool, error) {
 	if f.t != FTBool {
 		return false, fmt.Errorf("was %v, not bool", f.t)
 	}
-	switch byteSlice2String(f.value) {
+	switch ByteSlice2String(f.value) {
 	case "true":
 		return true, nil
 	case "false":
@@ -364,7 +363,7 @@ func (f File) Float() (float64, error) {
 	if f.t != FTFloat {
 		return 0.0, fmt.Errorf("was %v, not float", f.t)
 	}
-	s := byteSlice2String(f.value)
+	s := ByteSlice2String(f.value)
 	return strconv.ParseFloat(s, 64)
 }
 
@@ -385,7 +384,7 @@ func (f File) Int() (int64, error) {
 	if f.t != FTInt {
 		return 0, fmt.Errorf("was %v, not int", f.t)
 	}
-	s := byteSlice2String(f.value)
+	s := ByteSlice2String(f.value)
 	return strconv.ParseInt(s, 10, 64)
 }
 
@@ -405,7 +404,7 @@ func (f File) String() (string, error) {
 	if f.t != FTString {
 		return "", fmt.Errorf("was %v, not string", f.t)
 	}
-	return byteSlice2String(f.value), nil
+	return ByteSlice2String(f.value), nil
 }
 
 func (f File) StringOrZV() string {
@@ -443,21 +442,35 @@ func (f File) Any() any {
 func (f File) EncodeJSON(w io.Writer) error {
 	switch f.t {
 	case FTString:
-		err := writeOut(w, doubleQuote)
+		err := WriteOut(w, doubleQuote)
 		if err != nil {
 			return err
 		}
-		err = writeOut(w, f.value)
+		err = WriteOut(w, f.value)
 		if err != nil {
 			return err
 		}
-		err = writeOut(w, doubleQuote)
+		err = WriteOut(w, doubleQuote)
 		if err != nil {
 			return err
 		}
 		return nil
 	}
-	return writeOut(w, f.value)
+	return WriteOut(w, f.value)
+}
+
+type objType uint8
+
+const (
+	otUnknown = 0
+	otFile    = 1
+	otDir     = 2
+)
+
+type obj struct {
+	t    objType
+	file File
+	dir  Directory
 }
 
 // Directory represents an object or array in JSON nomenclature.
@@ -466,6 +479,8 @@ type Directory struct {
 	modTime time.Time
 	dirs    map[string]Directory
 	files   map[string]File
+
+	objs map[string]obj
 
 	isArray bool
 
@@ -509,7 +524,7 @@ func MustNewDir(name string, filesOrDirs ...any) Directory {
 // NewArray creates a new Directory that represents a JSON array.
 // filesOrDirs that have names will have them overridden.
 func NewArray(name string, filesOrDirs ...any) (Directory, error) {
-	d := newDir(name, time.Now())
+	d := newDir(name, time.Now()) // escape: maps
 	for i, fd := range filesOrDirs {
 		switch x := fd.(type) {
 		case Directory:
@@ -560,9 +575,8 @@ func (d Directory) Type() fs.FileMode {
 	return fs.ModeDir + 0444
 }
 
-// Info implements fs.DirEntry.Info().
-func (d Directory) Info() (fs.FileInfo, error) {
-	return fileInfo{
+func (d Directory) info() (FileInfo, error) {
+	return FileInfo{
 		name:    d.name,
 		size:    0,
 		mode:    d.Type(),
@@ -571,9 +585,14 @@ func (d Directory) Info() (fs.FileInfo, error) {
 	}, nil
 }
 
+// Info implements fs.DirEntry.Info().
+func (d Directory) Info() (fs.FileInfo, error) { // escape
+	return d.info()
+}
+
 // Stat implements fs.File.Stat().
 func (d Directory) Stat() (fs.FileInfo, error) {
-	return d.Info()
+	return d.info()
 }
 
 // Read implements fs.File.Read(). This will panic as it does on a filesystem.
@@ -629,16 +648,35 @@ func (d Directory) GetDir(name string) (Directory, error) {
 		defer d.mu.RUnlock()
 	}
 
-	fsys := NewFSFromDir(d)
-	file, err := fsys.Open(name)
-	if err != nil {
-		return Directory{}, err
+	name = strings.TrimPrefix(path.Clean(name), "/")
+	if !fs.ValidPath(name) {
+		return Directory{}, fmt.Errorf("invalid name for a path as reported by fs.ValidPath()")
 	}
-	fi, _ := file.Stat()
-	if !fi.IsDir() {
-		return Directory{}, fmt.Errorf("%q is a file not a directory", name)
+
+	if name == "." {
+		return d, nil
 	}
-	return file.(Directory), nil
+
+	dir := d
+
+	p := strings.Split(name, "/")
+	if len(p) == 0 {
+		return Directory{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("path is invalid")}
+	}
+
+	for i := 0; i < len(p)-1; i++ {
+		v, ok := dir.dirs[p[i]]
+		if !ok {
+			return Directory{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find directory %q", strings.Join(p, "/"))}
+		}
+		dir = v
+	}
+	fn := p[len(p)-1]
+	d, ok := dir.dirs[fn]
+	if ok {
+		return d, nil
+	}
+	return Directory{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find directory %q", "/"+name)}
 }
 
 // GetFile gets a file located at path "name".
@@ -648,16 +686,35 @@ func (d Directory) GetFile(name string) (File, error) {
 		defer d.mu.RUnlock()
 	}
 
-	fsys := NewFSFromDir(d)
-	file, err := fsys.Open(name)
-	if err != nil {
-		return File{}, err
+	name = strings.TrimPrefix(path.Clean(name), "/")
+	if !fs.ValidPath(name) {
+		return File{}, fmt.Errorf("invalid name for a path as reported by fs.ValidPath()")
 	}
-	fi, _ := file.Stat()
-	if fi.IsDir() {
-		return File{}, fmt.Errorf("%q is a directory", name)
+
+	if name == "." {
+		return File{}, fmt.Errorf("'.' is not a valid file name")
 	}
-	return file.(File), nil
+
+	dir := d
+
+	p := strings.Split(name, "/")
+	if len(p) == 0 {
+		return File{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("path is invalid")}
+	}
+
+	for i := 0; i < len(p)-1; i++ {
+		v, ok := dir.dirs[p[i]]
+		if !ok {
+			return File{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find directory %q", strings.Join(p, "/"))}
+		}
+		dir = v
+	}
+	fn := p[len(p)-1]
+	v, ok := dir.files[fn]
+	if ok {
+		return v, nil
+	}
+	return File{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find directory %q", "/"+name)}
 }
 
 // Remove removes a file or directory (empty) in this directory.
@@ -703,6 +760,7 @@ func (d Directory) WriteFile(name string, data []byte) error {
 	if dir != "" {
 		return fmt.Errorf("name(%s) must not be a path, just a filename", name)
 	}
+
 	o, err := dataToFile(file, data)
 	if err != nil {
 		return err
@@ -760,13 +818,13 @@ func (d Directory) Set(filesOrDirs ...any) error {
 // EncodeJSON encodes the Directory as JSON into the io.Writer passed.
 func (d Directory) EncodeJSON(w io.Writer) error {
 	if d.isArray {
-		return d.encodeJSONArray(w)
+		return fmt.Errorf("must encode from a Directory that is not an array")
 	}
 	return d.encodeJSONDict(w)
 }
 
 func (d Directory) encodeJSONArray(w io.Writer) error {
-	if err := writeOut(w, openBracket); err != nil {
+	if err := WriteOut(w, openBracket); err != nil {
 		return err
 	}
 
@@ -782,24 +840,30 @@ func (d Directory) encodeJSONArray(w io.Writer) error {
 			if !ok {
 				return fmt.Errorf("Directory was not a valid array, missing array index %d", i)
 			}
-			if err := fd.EncodeJSON(w); err != nil {
-				return err
+			if fd.isArray {
+				if err := fd.encodeJSONArray(w); err != nil {
+					return err
+				}
+			} else {
+				if err := fd.encodeJSONDict(w); err != nil {
+					return err
+				}
 			}
 		}
 		if i < len(d.dirs)+len(d.files)-1 {
-			if err := writeOut(w, comma); err != nil {
+			if err := WriteOut(w, comma); err != nil {
 				return err
 			}
 		}
 	}
-	if err := writeOut(w, closeBracket); err != nil {
+	if err := WriteOut(w, closeBracket); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (d Directory) encodeJSONDict(w io.Writer) error {
-	if err := writeOut(w, openBrace); err != nil {
+	if err := WriteOut(w, openBrace); err != nil {
 		return err
 	}
 
@@ -808,23 +872,23 @@ func (d Directory) encodeJSONDict(w io.Writer) error {
 
 	i := 0
 	for _, file := range d.files {
-		if err := writeOut(w, doubleQuote); err != nil {
+		if err := WriteOut(w, doubleQuote); err != nil {
 			return err
 		}
-		if err := writeOut(w, file.name); err != nil {
+		if err := WriteOut(w, file.name); err != nil {
 			return err
 		}
-		if err := writeOut(w, doubleQuote); err != nil {
+		if err := WriteOut(w, doubleQuote); err != nil {
 			return err
 		}
-		if err := writeOut(w, colon); err != nil {
+		if err := WriteOut(w, colon); err != nil {
 			return err
 		}
 		if err := file.EncodeJSON(w); err != nil {
 			return err
 		}
 		if i < len(d.files)-1 {
-			if err := writeOut(w, comma); err != nil {
+			if err := WriteOut(w, comma); err != nil {
 				return err
 			}
 		}
@@ -832,36 +896,43 @@ func (d Directory) encodeJSONDict(w io.Writer) error {
 	}
 
 	if filesExist && dirsExist {
-		if err := writeOut(w, comma); err != nil {
+		if err := WriteOut(w, comma); err != nil {
 			return err
 		}
 	}
 
 	i = 0
 	for _, dir := range d.dirs {
-		if err := writeOut(w, doubleQuote); err != nil {
+		if err := WriteOut(w, doubleQuote); err != nil {
 			return err
 		}
-		if err := writeOut(w, dir.name); err != nil {
+		if err := WriteOut(w, dir.name); err != nil {
 			return err
 		}
-		if err := writeOut(w, doubleQuote); err != nil {
+		if err := WriteOut(w, doubleQuote); err != nil {
 			return err
 		}
-		if err := writeOut(w, colon); err != nil {
+		if err := WriteOut(w, colon); err != nil {
 			return err
 		}
-		if err := dir.EncodeJSON(w); err != nil {
-			return err
+		if dir.isArray {
+			if err := dir.encodeJSONArray(w); err != nil {
+				return err
+			}
+		} else {
+			if err := dir.encodeJSONDict(w); err != nil {
+				return err
+			}
 		}
+
 		if i < len(d.dirs)-1 {
-			if err := writeOut(w, comma); err != nil {
+			if err := WriteOut(w, comma); err != nil {
 				return err
 			}
 		}
 		i++
 	}
-	if err := writeOut(w, closeBrace); err != nil {
+	if err := WriteOut(w, closeBrace); err != nil {
 		return err
 	}
 	return nil
@@ -938,359 +1009,62 @@ func Append[FD FileOrDir](array Directory, filesOrDirs ...FD) error {
 	return nil
 }
 
-type writeable interface {
-	rune | string | []byte
-}
-
-var writeOutPool = make(chan []byte, 10)
-
-func init() {
-	for i := 0; i < cap(writeOutPool); i++ {
-		b := make([]byte, 1)
-		writeOutPool <- b
-	}
-}
-
-func writeOut[S writeable](w io.Writer, values ...S) error {
-	for _, v := range values {
-		var b []byte
-		switch x := any(v).(type) {
-		case rune:
-			// This prevents unneccesary allocations in this case.
-			b := <-writeOutPool
-			b[0] = byte(x)
-			if _, err := w.Write(b); err != nil {
-				return err
-			}
-			writeOutPool <- b
-			continue
-		case string:
-			b = unsafeGetBytes(x)
-		case []byte:
-			b = x
+// CP will make a copy of the File or Directory and return it. The modtime of
+// the new directory and its files is the same as the old one.
+func CP[FD FileOrDir](fileOrDir FD) FD {
+	// This reuses fileOrDir, which is actually a copy of the Directory or
+	// File that came in. We only replace the pointers which are still
+	// pointing at the same locations.
+	switch x := any(fileOrDir).(type) {
+	case Directory:
+		if x.mu != nil {
+			x.mu.RLock()
+			defer x.mu.RUnlock()
 		}
+		oldDirs := x.dirs
+		oldFiles := x.files
 
-		if _, err := w.Write(b); err != nil {
-			return err
+		x.dirs = make(map[string]Directory, len(x.dirs))
+		x.files = make(map[string]File, len(x.files))
+		if x.mu != nil {
+			x.mu = &sync.RWMutex{}
 		}
-	}
-	return nil
-}
-
-func byteSlice2String(bs []byte) string {
-	return *(*string)(unsafe.Pointer(&bs))
-}
-
-// FS implements:
-// - fs.FS
-// - fs.ReadDirFS
-// - fs.ReadFileFS
-// - fs.StatFS
-// - fs.SubFS
-type FS struct {
-	root Directory
-}
-
-// NewFSFromDir creates a new FS from a Directory that will act as the root.
-func NewFSFromDir(dir Directory) *FS {
-	return &FS{root: dir}
-}
-
-// Open implements fs.FS.Open().
-func (f *FS) Open(name string) (fs.File, error) {
-	//log.Printf("Open(%s)", name)
-	name = strings.TrimPrefix(path.Clean(name), "/")
-	if !fs.ValidPath(name) {
-		return File{}, fmt.Errorf("invalid name for a path as reported by fs.ValidPath()")
-	}
-
-	d := f.root
-	if name == "." {
-		return d, nil
-	}
-
-	p := strings.Split(name, "/")
-	if len(p) == 0 {
-		return nil, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("path is invalid")}
-	}
-
-	for i := 0; i < len(p)-1; i++ {
-		v, ok := d.dirs[p[i]]
-		if !ok {
-			return nil, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find directory %q", strings.Join(p, "/"))}
+		for k, v := range oldDirs {
+			x.dirs[k] = v
 		}
-		d = v
-	}
-	fn := p[len(p)-1]
-	v, ok := d.files[fn]
-	if ok {
-		return v, nil
-	}
-	d, ok = d.dirs[fn]
-	if ok {
-		return d, nil
-	}
-	return nil, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find file %q", "/"+name)}
-}
-
-// ReadDir implements fs.ReadDirFS.Read().
-func (f *FS) ReadDir(name string) ([]fs.DirEntry, error) {
-	file, err := f.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	d, ok := file.(Directory)
-	if !ok {
-		return nil, fmt.Errorf("%q is not a directory", name)
-	}
-
-	return d.ReadDir(0)
-}
-
-func (f *FS) Stat(name string) (fs.FileInfo, error) {
-	file, err := f.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	return file.Stat()
-}
-
-// ReadFile implemnts fs.ReadFileFS.ReadFile().
-func (f *FS) ReadFile(name string) ([]byte, error) {
-	file, err := f.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	fi, _ := file.Stat()
-	if fi.IsDir() {
-		panic(fmt.Sprintf("panic: read %s: is a directory", name))
-	}
-
-	return io.ReadAll(file)
-}
-
-// Sub implements fs.SubFS.Sub().
-func (f *FS) Sub(dir string) (fs.FS, error) {
-	file, err := f.Open(dir)
-	if err != nil {
-		return nil, err
-	}
-	fi, _ := file.Stat()
-	if !fi.IsDir() {
-		return nil, &fs.PathError{Op: "Sub", Path: dir, Err: errors.New("not a directory")}
-	}
-
-	return NewFSFromDir(file.(Directory)), nil
-}
-
-/*
-// Not sure I want to do this.
-
-// OpenFile implements github.com/gopherfs/fs/OpenFiler.OpenFile(). If opening a directory,
-// directory must exist and perm must be fs.ModeDir + 0555. You cannot write to a
-// directory.  If opening a file an existing file, the mode must be 0444. If openeing
-// a new file, the mode must be 0555.
-func (f *FS) OpenFile(name string, perm fs.FileMode, options ...gopherfs.OFOption) (fs.File, error) {
-	if len(options) != 0 {
-		return nil, fmt.Errorf("filesystem does not support any options to OpenFile")
-	}
-
-	if perm !=
-}
-*/
-
-// MkdirAll creates a directory named path, along with any necessary parents, and returns nil, or else returns an error.
-// The permission bits perm (before umask) are used for all directories that MkdirAll creates, which must be
-// 2147483940 (fs.ModeDir + 0444).
-// If path is already a directory, MkdirAll does nothing and returns nil.
-// This implements github.com/gopherfs/fs.MkdirAllFS.MkdirAll.
-// TODO(jdoak): Move logic to Directory.MkdirAll and take a lock.
-func (f *FS) MkdirAll(p string, perm fs.FileMode) error {
-	if perm != fs.ModeDir+0444 {
-		return fmt.Errorf("incorrect FileMode")
-	}
-
-	p = strings.TrimPrefix(path.Clean(p), "/")
-	if !fs.ValidPath(p) {
-		return fmt.Errorf("invalid name for a path as reported by fs.ValidPath()")
-	}
-
-	sp := strings.Split(p, "/")
-	if len(sp) == 0 {
-		return &fs.PathError{Op: "mkdirall", Path: p, Err: fmt.Errorf("path is invalid")}
-	}
-
-	d := f.root
-	for i := 0; i < len(sp)-1; i++ {
-		if _, ok := d.files[sp[i]]; ok {
-			return &fs.PathError{Op: "mkdirall", Path: p, Err: fmt.Errorf("%q is a file", strings.Join(sp[:i+1], "/"))}
+		for k, v := range oldFiles {
+			x.files[k] = CP(v)
 		}
-		v, ok := d.dirs[sp[i]]
-		if !ok {
-			dir := Directory{name: sp[i], modTime: time.Now()}
-			d.dirs[sp[i]] = dir
-			d = dir
-			continue
-		}
-		d = v
-	}
-	return nil
-}
+	case File:
+		b := make([]byte, len(x.value))
+		copy(b, x.value)
+		x.value = b
+		x.readValue = nil
 
-// WriteFile writes file with path "name" to the filesystem. If the file
-// already exists, this will overwrite the existing file. data must not
-// be mutated after it is passed here. perm must be 0444.
-// This implements github.com/gopherfs/fs.Writer .
-func (f *FS) WriteFile(name string, data []byte, perm fs.FileMode) error {
-	if perm != 0444 {
-		return fmt.Errorf("filesystem only accepts perm 0444")
 	}
-	if name == "" {
-		return &fs.PathError{Op: "writeFile", Path: name, Err: fmt.Errorf("name cannot be empty")}
-	}
-	if len(data) == 0 {
-		return &fs.PathError{Op: "writeFile", Path: name, Err: fmt.Errorf("filesystem doesn't support empty files")}
-	}
-
-	var d Directory
-	dir, file := path.Split(name)
-	if dir == "" {
-		d = f.root
-	} else {
-		x, err := f.Open(dir)
-		if err != nil {
-			return err
-		}
-		d = x.(Directory)
-	}
-
-	return d.WriteFile(file, data)
-}
-
-// Remove removes a file or directory (empty) at path "name". This implements
-// github.com/gopherfs/fs.Remove.Remove .
-func (f *FS) Remove(name string) error {
-	return f.remove(name, false)
-}
-
-// RemoveAll removes path and any children it contains. It removes
-// everything it can but returns the first error it encounters.
-// If the path does not exist, RemoveAll returns nil (no error).
-// If there is an error, it will be of type *fs.PathError.
-func (f *FS) RemoveAll(path string) error {
-	return f.remove(path, true)
-}
-
-func (f *FS) remove(name string, children bool) error {
-	name = strings.TrimPrefix(path.Clean(name), "/")
-	if !fs.ValidPath(name) {
-		return &fs.PathError{Op: "remove", Path: name, Err: fmt.Errorf("invalid name for a path as reported by fs.ValidPath()")}
-	}
-
-	p := strings.Split(name, "/")
-	if len(p) == 0 {
-		return &fs.PathError{Op: "remove", Path: name, Err: fmt.Errorf("path is invalid")}
-	}
-
-	d := f.root
-	for i := 0; i < len(p)-1; i++ {
-		v, ok := d.dirs[p[i]]
-		if !ok {
-			return &fs.PathError{Op: "remove", Path: name, Err: fmt.Errorf("could not find directory %q", strings.Join(p, "/"))}
-		}
-		d = v
-	}
-
-	fn := p[len(p)-1]
-	if children {
-		if err := d.RemoveAll(fn); err != nil {
-			return &fs.PathError{Op: "remove", Path: name, Err: err}
-		}
-		return nil
-	}
-	if err := d.Remove(fn); err != nil {
-		return &fs.PathError{Op: "remove", Path: name, Err: err}
-	}
-	return nil
+	return fileOrDir
 }
 
 func dataToFile(name string, data []byte) (File, error) {
-	b := bytes.NewBuffer(data)
-
-	r, _, err := b.ReadRune()
+	ft, err := DataType(data)
 	if err != nil {
-		return File{}, fmt.Errorf("could not read rune in WriteFile data: %s", err)
+		return File{}, err
 	}
 
-	switch r {
-	case openBrace:
-		return File{}, fmt.Errorf("file cannot be a JSON object")
-	case openBracket:
-		return File{}, fmt.Errorf("file cannot be a JSON array")
-	case 't':
-		if len(data) == 4 {
-			if byteSlice2String(data) == "true" {
-				return File{
-					name:    name,
-					modTime: time.Now(),
-					t:       FTBool,
-					value:   data,
-				}, nil
-			}
-		}
-	case 'f':
-		if len(data) == 5 {
-			if byteSlice2String(data) == "false" {
-				return File{
-					name:    name,
-					modTime: time.Now(),
-					t:       FTBool,
-					value:   data,
-				}, nil
-			}
-		}
-	case 'n':
-		if len(data) == 4 {
-			if byteSlice2String(data) == "null" {
-				return File{
-					name:    name,
-					modTime: time.Now(),
-					t:       FTNull,
-					value:   data,
-				}, nil
-			}
-		}
-	}
+	return File{
+		name:    name,
+		modTime: time.Now(),
+		t:       ft,
+		value:   data,
+	}, nil
+}
 
-	if unicode.IsNumber(r) {
-		seenDot := false
-		for {
-			r, _, err := b.ReadRune()
-			if err != nil {
-				if err == io.EOF {
-					t := FTInt
-					if seenDot {
-						t = FTFloat
-					}
-					return File{
-						name:    name,
-						modTime: time.Now(),
-						t:       t,
-						value:   data,
-					}, nil
-				}
-				return File{}, fmt.Errorf("could not read rune in WriteFile data: %s", err)
-			}
-			switch {
-			case unicode.IsNumber(r):
-			case r == '.':
-				if !seenDot {
-					seenDot = true
-					continue
-				}
-			}
-			break
-		}
-	}
-	return File{name: name, modTime: time.Now(), t: FTString, value: data}, nil
+const arraySuffix = `_.array._`
+
+func ArrayDirName(name string) string {
+	return name + arraySuffix
+}
+
+func DirNameFromArray(name string) string {
+	return strings.TrimSuffix(name, arraySuffix)
 }
