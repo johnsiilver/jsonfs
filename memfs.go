@@ -45,24 +45,26 @@ func (f MemFS) Open(name string) (fs.File, error) {
 	}
 
 	for i := 0; i < len(p)-1; i++ {
-		v, ok := d.dirs[p[i]]
-		if !ok {
+		v, ok := d.objs[p[i]]
+		if !ok || v.Type != OTDir {
 			return nil, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find directory %q", strings.Join(p, "/"))}
 		}
-		d = v
+		d = v.Dir
 	}
 	fn := p[len(p)-1]
-	v, ok := d.files[fn]
-	if ok {
-		x := v.value
-		v.readValue = &x
-		return v, nil
+	v, ok := d.objs[fn]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find file %q", "/"+name)}
 	}
-	d, ok = d.dirs[fn]
-	if ok {
-		return d, nil
+	switch v.Type {
+	case OTDir:
+		return v.Dir, nil
+	case OTFile:
+		x := v.File.value
+		v.File.readValue = &x
+		return v.File, nil
 	}
-	return nil, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find file %q", "/"+name)}
+	panic("should never get here")
 }
 
 // OpenFile implements gopherfs.OpenFiler. Perms are ignored except for the IsDir directive.
@@ -81,7 +83,7 @@ func (m MemFS) OpenFile(name string, perms fs.FileMode, options ...gopherfs.OFOp
 		dirName, fileName := path.Split(name)
 		if dirName == "" { // They want to create a directory at the root
 			d, _ := NewDir(fileName) // Cannot error, as we are not passing contents
-			m.root.dirs[fileName] = d
+			m.root.objs[fileName] = Object{Type: OTDir, Dir: d}
 			return d, nil
 		}
 
@@ -98,7 +100,7 @@ func (m MemFS) OpenFile(name string, perms fs.FileMode, options ...gopherfs.OFOp
 		}
 
 		dir, _ := NewDir(fileName)
-		d.dirs[fileName] = dir
+		d.objs[fileName] = Object{Type: OTDir, Dir: dir}
 		return dir, nil
 	}
 
@@ -204,17 +206,17 @@ func (f MemFS) MkdirAll(p string, perm fs.FileMode) error {
 
 	d := *f.root
 	for i := 0; i < len(sp)-1; i++ {
-		if _, ok := d.files[sp[i]]; ok {
-			return &fs.PathError{Op: "mkdirall", Path: p, Err: fmt.Errorf("%q is a file", strings.Join(sp[:i+1], "/"))}
-		}
-		v, ok := d.dirs[sp[i]]
-		if !ok {
-			dir := Directory{name: sp[i], modTime: time.Now()}
-			d.dirs[sp[i]] = dir
-			d = dir
+		o, ok := d.objs[sp[i]]
+		if ok {
+			if o.Type == OTFile {
+				return &fs.PathError{Op: "mkdirall", Path: p, Err: fmt.Errorf("%q is a file", strings.Join(sp[:i+1], "/"))}
+			}
+			d = o.Dir
 			continue
 		}
-		d = v
+		dir := Directory{name: sp[i], modTime: time.Now()}
+		d.objs[sp[i]] = Object{Type: OTDir, Dir: dir}
+		d = dir
 	}
 	return nil
 }
@@ -276,11 +278,14 @@ func (f MemFS) remove(name string, children bool) error {
 
 	d := *f.root
 	for i := 0; i < len(p)-1; i++ {
-		v, ok := d.dirs[p[i]]
+		o, ok := d.objs[p[i]]
 		if !ok {
 			return &fs.PathError{Op: "remove", Path: name, Err: fmt.Errorf("could not find directory %q", strings.Join(p, "/"))}
 		}
-		d = v
+		if o.Type != OTDir {
+			return &fs.PathError{Op: "remove", Path: name, Err: fmt.Errorf("could not find directory %q, %q was a file not a directory", strings.Join(p, "/"), strings.Join(p[:i+1], "/"))}
+		}
+		d = o.Dir
 	}
 
 	fn := p[len(p)-1]

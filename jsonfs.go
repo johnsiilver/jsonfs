@@ -459,28 +459,25 @@ func (f File) EncodeJSON(w io.Writer) error {
 	return WriteOut(w, f.value)
 }
 
-type objType uint8
+type ObjType uint8
 
 const (
-	otUnknown = 0
-	otFile    = 1
-	otDir     = 2
+	OTUnknown = 0
+	OTFile    = 1
+	OTDir     = 2
 )
 
-type obj struct {
-	t    objType
-	file File
-	dir  Directory
+type Object struct {
+	Type ObjType
+	File File
+	Dir  Directory
 }
 
 // Directory represents an object or array in JSON nomenclature.
 type Directory struct {
 	name    string
 	modTime time.Time
-	dirs    map[string]Directory
-	files   map[string]File
-
-	objs map[string]obj
+	objs    map[string]Object
 
 	isArray bool
 
@@ -499,12 +496,12 @@ func NewDir(name string, filesOrDirs ...any) (Directory, error) {
 			if x.name == "" {
 				return Directory{}, fmt.Errorf("a passed File had no name")
 			}
-			d.files[x.name] = x
+			d.objs[x.name] = Object{Type: OTFile, File: x}
 		case Directory:
 			if x.name == "" {
 				return Directory{}, fmt.Errorf("a passed Directory had no name")
 			}
-			d.dirs[x.name] = x
+			d.objs[x.name] = Object{Type: OTDir, Dir: x}
 		default:
 			return Directory{}, fmt.Errorf("%T is not a supported type", fd)
 		}
@@ -529,10 +526,10 @@ func NewArray(name string, filesOrDirs ...any) (Directory, error) {
 		switch x := fd.(type) {
 		case Directory:
 			x.name = strconv.Itoa(i)
-			d.dirs[strconv.Itoa(i)] = x
+			d.objs[x.name] = Object{Type: OTDir, Dir: x}
 		case File:
 			x.name = strconv.Itoa(i)
-			d.files[strconv.Itoa(i)] = x
+			d.objs[x.name] = Object{Type: OTFile, File: x}
 		default:
 			return Directory{}, fmt.Errorf("%T is not a supported type", fd)
 		}
@@ -553,8 +550,7 @@ func newDir(name string, modTime time.Time) Directory {
 	return Directory{
 		name:    name,
 		modTime: time.Time{},
-		dirs:    map[string]Directory{},
-		files:   map[string]File{},
+		objs:    map[string]Object{},
 	}
 }
 
@@ -607,23 +603,22 @@ func (d Directory) ReadDir(n int) ([]fs.DirEntry, error) {
 		defer d.mu.RUnlock()
 	}
 
-	de := make([]fs.DirEntry, 0, len(d.dirs)+len(d.files))
-	for _, dir := range d.dirs {
+	de := make([]fs.DirEntry, 0, len(d.objs))
+	for _, obj := range d.objs {
+		//obj{t: otFile, file: x}
 		if n > 0 {
 			if len(de) == n {
 				break
 			}
 		}
-		de = append(de, dir)
-	}
-	for _, file := range d.files {
-		if n > 0 {
-			if len(de) == n {
-				break
-			}
+		switch obj.Type {
+		case OTFile:
+			de = append(de, obj.File)
+		case OTDir:
+			de = append(de, obj.Dir)
 		}
-		de = append(de, file)
 	}
+
 	if len(de) == 0 && n > 0 {
 		return de, io.EOF
 	}
@@ -665,16 +660,19 @@ func (d Directory) GetDir(name string) (Directory, error) {
 	}
 
 	for i := 0; i < len(p)-1; i++ {
-		v, ok := dir.dirs[p[i]]
+		v, ok := dir.objs[p[i]]
 		if !ok {
 			return Directory{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find directory %q", strings.Join(p, "/"))}
 		}
-		dir = v
+		if v.Type != OTDir {
+			return Directory{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find directory %q, %q was a file not a directory", strings.Join(p, "/"), strings.Join(p[:i+1], "/"))}
+		}
+		dir = v.Dir
 	}
 	fn := p[len(p)-1]
-	d, ok := dir.dirs[fn]
-	if ok {
-		return d, nil
+	o, ok := dir.objs[fn]
+	if ok && o.Type == OTDir {
+		return o.Dir, nil
 	}
 	return Directory{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find directory %q", "/"+name)}
 }
@@ -697,24 +695,29 @@ func (d Directory) GetFile(name string) (File, error) {
 
 	dir := d
 
-	p := strings.Split(name, "/")
-	if len(p) == 0 {
-		return File{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("path is invalid")}
-	}
-
-	for i := 0; i < len(p)-1; i++ {
-		v, ok := dir.dirs[p[i]]
-		if !ok {
-			return File{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find directory %q", strings.Join(p, "/"))}
+	dirName, fileName := path.Split(name)
+	if dirName != "" {
+		dd, err := d.GetDir(dirName)
+		if err != nil {
+			return File{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find directory %q", dirName)}
 		}
-		dir = v
+		dir = dd
 	}
-	fn := p[len(p)-1]
-	v, ok := dir.files[fn]
-	if ok {
-		return v, nil
+	o, ok := dir.objs[fileName]
+	if ok && o.Type == OTFile {
+		return o.File, nil
 	}
 	return File{}, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("could not find directory %q", "/"+name)}
+}
+
+func (d Directory) GetObjects() chan Object {
+	ch := make(chan Object, 1)
+	go func() {
+		for _, o := range d.objs {
+			ch <- o
+		}
+	}()
+	return ch
 }
 
 // Remove removes a file or directory (empty) in this directory.
@@ -733,17 +736,20 @@ func (d Directory) remove(name string, children bool) error {
 		defer d.mu.RUnlock()
 	}
 
-	if _, ok := d.files[name]; ok {
-		delete(d.files, name)
-		return nil
+	o, ok := d.objs[name]
+	if !ok {
+		return fmt.Errorf("file/directory(%s) was not found", name)
 	}
-	if _, ok := d.dirs[name]; ok {
-		if len(d.files)+len(d.dirs) != 0 {
-			if !children {
-				return fmt.Errorf("directory not empty")
-			}
+	switch o.Type {
+	case OTDir:
+		if len(o.Dir.objs) != 0 && !children {
+			return fmt.Errorf("directory(%s) was not empty", name)
 		}
-		delete(d.dirs, name)
+		delete(o.Dir.objs, name)
+	case OTFile:
+		delete(d.objs, name)
+	default:
+		panic("unsuported object type")
 	}
 	return nil
 }
@@ -761,12 +767,12 @@ func (d Directory) WriteFile(name string, data []byte) error {
 		return fmt.Errorf("name(%s) must not be a path, just a filename", name)
 	}
 
-	o, err := dataToFile(file, data)
+	f, err := dataToFile(file, data)
 	if err != nil {
 		return err
 	}
 
-	d.files[name] = o
+	d.objs[name] = Object{Type: OTFile, File: f}
 	return nil
 }
 
@@ -777,7 +783,7 @@ func (d Directory) Len() int {
 		defer d.mu.RUnlock()
 	}
 
-	return len(d.dirs) + len(d.files)
+	return len(d.objs)
 }
 
 // Set will set sub directories or files in the Directory. If a file or
@@ -807,9 +813,9 @@ func (d Directory) Set(filesOrDirs ...any) error {
 	for _, fd := range filesOrDirs {
 		switch x := fd.(type) {
 		case File:
-			d.files[x.name] = x
+			d.objs[x.name] = Object{Type: OTFile, File: x}
 		case Directory:
-			d.dirs[x.name] = x
+			d.objs[x.name] = Object{Type: OTDir, Dir: x}
 		}
 	}
 	return nil
@@ -828,29 +834,31 @@ func (d Directory) encodeJSONArray(w io.Writer) error {
 		return err
 	}
 
-	for i := 0; i < len(d.files)+len(d.dirs); i++ {
+	for i := 0; i < len(d.objs); i++ {
 		is := strconv.Itoa(i)
-		fv, ok := d.files[is]
-		if ok {
-			if err := fv.EncodeJSON(w); err != nil {
+		o, ok := d.objs[is]
+		if !ok {
+			return fmt.Errorf("Directory was not a valid array, missing array index %d", i)
+		}
+
+		switch o.Type {
+		case OTFile:
+			if err := o.File.EncodeJSON(w); err != nil {
 				return err
 			}
-		} else {
-			fd, ok := d.dirs[is]
-			if !ok {
-				return fmt.Errorf("Directory was not a valid array, missing array index %d", i)
-			}
-			if fd.isArray {
-				if err := fd.encodeJSONArray(w); err != nil {
+		case OTDir:
+			if o.Dir.isArray {
+				if err := o.Dir.encodeJSONArray(w); err != nil {
 					return err
 				}
 			} else {
-				if err := fd.encodeJSONDict(w); err != nil {
+				if err := o.Dir.encodeJSONDict(w); err != nil {
 					return err
 				}
 			}
 		}
-		if i < len(d.dirs)+len(d.files)-1 {
+
+		if i < len(d.objs)-1 {
 			if err := WriteOut(w, comma); err != nil {
 				return err
 			}
@@ -867,47 +875,21 @@ func (d Directory) encodeJSONDict(w io.Writer) error {
 		return err
 	}
 
-	filesExist := len(d.files) > 0
-	dirsExist := len(d.dirs) > 0
-
+	l := len(d.objs)
 	i := 0
-	for _, file := range d.files {
+	for _, o := range d.objs {
 		if err := WriteOut(w, doubleQuote); err != nil {
 			return err
 		}
-		if err := WriteOut(w, file.name); err != nil {
-			return err
-		}
-		if err := WriteOut(w, doubleQuote); err != nil {
-			return err
-		}
-		if err := WriteOut(w, colon); err != nil {
-			return err
-		}
-		if err := file.EncodeJSON(w); err != nil {
-			return err
-		}
-		if i < len(d.files)-1 {
-			if err := WriteOut(w, comma); err != nil {
+		switch o.Type {
+		case OTFile:
+			if err := WriteOut(w, o.File.name); err != nil {
 				return err
 			}
-		}
-		i++
-	}
-
-	if filesExist && dirsExist {
-		if err := WriteOut(w, comma); err != nil {
-			return err
-		}
-	}
-
-	i = 0
-	for _, dir := range d.dirs {
-		if err := WriteOut(w, doubleQuote); err != nil {
-			return err
-		}
-		if err := WriteOut(w, dir.name); err != nil {
-			return err
+		case OTDir:
+			if err := WriteOut(w, o.Dir.name); err != nil {
+				return err
+			}
 		}
 		if err := WriteOut(w, doubleQuote); err != nil {
 			return err
@@ -915,23 +897,30 @@ func (d Directory) encodeJSONDict(w io.Writer) error {
 		if err := WriteOut(w, colon); err != nil {
 			return err
 		}
-		if dir.isArray {
-			if err := dir.encodeJSONArray(w); err != nil {
+		switch o.Type {
+		case OTFile:
+			if err := o.File.EncodeJSON(w); err != nil {
 				return err
 			}
-		} else {
-			if err := dir.encodeJSONDict(w); err != nil {
-				return err
+		case OTDir:
+			if o.Dir.isArray {
+				if err := o.Dir.encodeJSONArray(w); err != nil {
+					return err
+				}
+			} else {
+				if err := o.Dir.encodeJSONDict(w); err != nil {
+					return err
+				}
 			}
 		}
-
-		if i < len(d.dirs)-1 {
+		if i < l-1 {
 			if err := WriteOut(w, comma); err != nil {
 				return err
 			}
 		}
 		i++
 	}
+
 	if err := WriteOut(w, closeBrace); err != nil {
 		return err
 	}
@@ -957,29 +946,17 @@ func ArraySet[FD FileOrDir](array Directory, index int, fd FD) error {
 
 	switch x := any(fd).(type) {
 	case Directory:
-		if _, ok := array.dirs[indexS]; ok {
-			array.dirs[indexS] = x
-		}
-		if _, ok := array.files[indexS]; ok {
-			delete(array.files, indexS)
-			array.dirs[indexS] = x
+		if _, ok := array.objs[indexS]; ok {
+			array.objs[indexS] = Object{Type: OTDir, Dir: x}
 		}
 	case File:
-		if _, ok := array.files[indexS]; ok {
-			array.files[indexS] = x
-		}
-		if _, ok := array.dirs[indexS]; ok {
-			delete(array.dirs, indexS)
-			array.files[indexS] = x
+		if _, ok := array.objs[indexS]; ok {
+			array.objs[indexS] = Object{Type: OTFile, File: x}
 		}
 	case nil:
 		f := File{t: FTNull, value: unsafeGetBytes("null")}
-		if _, ok := array.files[indexS]; ok {
-			array.files[indexS] = f
-		}
-		if _, ok := array.dirs[indexS]; ok {
-			delete(array.dirs, indexS)
-			array.files[indexS] = f
+		if _, ok := array.objs[indexS]; ok {
+			array.objs[indexS] = Object{Type: OTFile, File: f}
 		}
 	}
 	return nil
@@ -992,18 +969,19 @@ func Append[FD FileOrDir](array Directory, filesOrDirs ...FD) error {
 		return fmt.Errorf("cannot append to a Dictionary that is not an array")
 	}
 
-	start := len(array.dirs) + len(array.files)
+	start := len(array.objs)
 	for i, fd := range filesOrDirs {
 		index := strconv.Itoa(i + start)
 		switch x := any(fd).(type) {
 		case Directory:
 			x.name = index
-			array.dirs[index] = x
+			array.objs[index] = Object{Type: OTDir, Dir: x}
 		case File:
 			x.name = index
-			array.files[index] = x
+			array.objs[index] = Object{Type: OTFile, File: x}
 		case nil:
-			array.files[index] = File{t: FTNull, value: unsafeGetBytes("null")}
+			f := File{t: FTNull, value: unsafeGetBytes("null")}
+			array.objs[index] = Object{Type: OTFile, File: f}
 		}
 	}
 	return nil
@@ -1021,26 +999,24 @@ func CP[FD FileOrDir](fileOrDir FD) FD {
 			x.mu.RLock()
 			defer x.mu.RUnlock()
 		}
-		oldDirs := x.dirs
-		oldFiles := x.files
 
-		x.dirs = make(map[string]Directory, len(x.dirs))
-		x.files = make(map[string]File, len(x.files))
+		x.objs = make(map[string]Object, len(x.objs))
 		if x.mu != nil {
 			x.mu = &sync.RWMutex{}
 		}
-		for k, v := range oldDirs {
-			x.dirs[k] = v
-		}
-		for k, v := range oldFiles {
-			x.files[k] = CP(v)
+		for k, v := range x.objs {
+			switch v.Type {
+			case OTDir:
+				x.objs[k] = Object{Type: OTDir, Dir: CP(v.Dir)}
+			case OTFile:
+				x.objs[k] = Object{Type: OTFile, File: CP(v.File)}
+			}
 		}
 	case File:
 		b := make([]byte, len(x.value))
 		copy(b, x.value)
 		x.value = b
 		x.readValue = nil
-
 	}
 	return fileOrDir
 }

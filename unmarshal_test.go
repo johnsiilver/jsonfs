@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"io/ioutil"
+	"log"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -303,20 +306,76 @@ func BenchmarkStandardUnmarshalLarge(b *testing.B) {
 	}
 }
 
-/*
-func BenchmarkStandardUnmarshalDecoderLarge(b *testing.B) {
+func BenchmarkObjectWalk(b *testing.B) {
 	b.ReportAllocs()
+	r := strings.NewReader(largeJSON)
+	dir, err := UnmarshalJSON(r)
+	if err != nil {
+		panic(err)
+	}
 
-	dec := json.NewDecoder()
+	fsys := NewMemFS(dir)
 
-	m := map[string]any{}
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := json.Unmarshal(unsafeGetBytes(largeJSON), &m); err != nil {
-			panic(err)
+		fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				log.Fatal(err)
+			}
+			if d.IsDir() {
+				return nil
+			}
+
+			x := d.(File)
+			fmt.Fprintf(ioutil.Discard, "%s --> %v", p, x.Any())
+			return nil
+		})
+	}
+}
+
+func printMapValues(m map[string]any, p []string) {
+	for k, v := range m {
+		switch x := v.(type) {
+		case map[string]any:
+			fmt.Fprintf(ioutil.Discard, "%s", strings.Join(append(p, k), "/"))
+			printMapValues(x, append(p, k))
+		case []any:
+			fmt.Fprintf(ioutil.Discard, "%s", strings.Join(append(p, k), "/"))
+			printArrayValues(x, append(p, k))
+		default:
+			fmt.Fprintf(ioutil.Discard, "%s --> %v", strings.Join(append(p, k), "/"), v)
 		}
 	}
 }
-*/
+
+func printArrayValues(l []any, p []string) {
+	for i, v := range l {
+		switch x := v.(type) {
+		case map[string]any:
+			fmt.Fprintf(ioutil.Discard, "%s", strings.Join(append(p, strconv.Itoa(i)), "/"))
+			printMapValues(x, append(p, strconv.Itoa(i)))
+		case []any:
+			fmt.Fprintf(ioutil.Discard, "%s", strings.Join(append(p, strconv.Itoa(i)), "/"))
+			printArrayValues(x, append(p, strconv.Itoa(i)))
+		default:
+			fmt.Fprintf(ioutil.Discard, "%s --> %v", strings.Join(append(p, strconv.Itoa(i)), "/"), v)
+		}
+	}
+}
+
+func BenchmarkStdlibObjectWalk(b *testing.B) {
+	b.ReportAllocs()
+
+	m := map[string]any{}
+	if err := json.Unmarshal(unsafeGetBytes(largeJSON), &m); err != nil {
+		panic(err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		printMapValues(m, []string{})
+	}
+}
 
 func compareKeys(d Directory, want []string) error {
 	got, err := d.ReadDir(0)

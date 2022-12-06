@@ -79,7 +79,7 @@ func UnmarshalStream(ctx context.Context, r io.Reader) chan Stream {
 				ch <- Stream{Err: err}
 				return
 			}
-			if dir.name == "" && len(dir.files)+len(dir.dirs) == 0 {
+			if dir.name == "" && len(dir.objs) == 0 {
 				return
 			}
 			ch <- Stream{Dir: dir}
@@ -233,7 +233,7 @@ func (m *dictSM) valueCheck(ctx context.Context) stateFn {
 			return nil
 		}
 
-		m.dir.dirs[nm.V.dir.name] = nm.V.dir
+		m.dir.objs[nm.V.dir.name] = Object{Type: OTDir, Dir: nm.V.dir}
 		nm.Close()
 		return m.commaClose
 	case arrayNext:
@@ -246,7 +246,7 @@ func (m *dictSM) valueCheck(ctx context.Context) stateFn {
 			return nil
 		}
 
-		m.dir.dirs[na.V.dir.name] = na.V.dir
+		m.dir.objs[na.V.dir.name] = Object{Type: OTDir, Dir: na.V.dir}
 		na.Close()
 		return m.commaClose
 	case stringNext:
@@ -255,7 +255,7 @@ func (m *dictSM) valueCheck(ctx context.Context) stateFn {
 			m.err = err
 			return nil
 		}
-		m.dir.files[m.valueName] = o
+		m.dir.objs[m.valueName] = Object{Type: OTFile, File: o}
 		return m.commaClose
 	case trueNext:
 		o, err := decodeBool(m.b, m.valueName, trueNext, m.modTime)
@@ -263,7 +263,7 @@ func (m *dictSM) valueCheck(ctx context.Context) stateFn {
 			m.err = err
 			return nil
 		}
-		m.dir.files[m.valueName] = o
+		m.dir.objs[m.valueName] = Object{Type: OTFile, File: o}
 		return m.commaClose
 	case falseNext:
 		o, err := decodeBool(m.b, m.valueName, falseNext, m.modTime)
@@ -271,7 +271,7 @@ func (m *dictSM) valueCheck(ctx context.Context) stateFn {
 			m.err = err
 			return nil
 		}
-		m.dir.files[m.valueName] = o
+		m.dir.objs[m.valueName] = Object{Type: OTFile, File: o}
 		return m.commaClose
 	case numNext:
 		o, err := decodeNumber(m.b, m.valueName, m.modTime)
@@ -279,7 +279,7 @@ func (m *dictSM) valueCheck(ctx context.Context) stateFn {
 			m.err = err
 			return nil
 		}
-		m.dir.files[m.valueName] = o
+		m.dir.objs[m.valueName] = Object{Type: OTFile, File: o}
 		return m.commaClose
 	case nullNext:
 		o, err := decodeNull(m.b, m.valueName, m.modTime)
@@ -287,7 +287,7 @@ func (m *dictSM) valueCheck(ctx context.Context) stateFn {
 			m.err = err
 			return nil
 		}
-		m.dir.files[m.valueName] = o
+		m.dir.objs[m.valueName] = Object{Type: OTFile, File: o}
 		return m.commaClose
 	}
 
@@ -427,7 +427,7 @@ func (m *arraySM) valueCheck(ctx context.Context) stateFn {
 			return nil
 		}
 
-		m.dir.dirs[nm.V.dir.name] = nm.V.dir
+		m.dir.objs[nm.V.dir.name] = Object{Type: OTDir, Dir: nm.V.dir}
 		nm.Close()
 		return m.commaClose
 	case arrayNext:
@@ -440,7 +440,7 @@ func (m *arraySM) valueCheck(ctx context.Context) stateFn {
 			return nil
 		}
 
-		m.dir.dirs[na.V.dir.name] = na.V.dir
+		m.dir.objs[na.V.dir.name] = Object{Type: OTDir, Dir: na.V.dir}
 		na.Close()
 		return m.commaClose
 	case stringNext:
@@ -449,7 +449,7 @@ func (m *arraySM) valueCheck(ctx context.Context) stateFn {
 			m.err = err
 			return nil
 		}
-		m.dir.files[valueName] = o
+		m.dir.objs[valueName] = Object{Type: OTFile, File: o}
 		return m.commaClose
 	case trueNext:
 		o, err := decodeBool(m.b, valueName, trueNext, m.modTime)
@@ -457,7 +457,7 @@ func (m *arraySM) valueCheck(ctx context.Context) stateFn {
 			m.err = err
 			return nil
 		}
-		m.dir.files[valueName] = o
+		m.dir.objs[valueName] = Object{Type: OTFile, File: o}
 		return m.commaClose
 	case falseNext:
 		o, err := decodeBool(m.b, valueName, falseNext, m.modTime)
@@ -465,7 +465,7 @@ func (m *arraySM) valueCheck(ctx context.Context) stateFn {
 			m.err = err
 			return nil
 		}
-		m.dir.files[valueName] = o
+		m.dir.objs[valueName] = Object{Type: OTFile, File: o}
 		return m.commaClose
 	case numNext:
 		o, err := decodeNumber(m.b, valueName, m.modTime)
@@ -473,7 +473,7 @@ func (m *arraySM) valueCheck(ctx context.Context) stateFn {
 			m.err = err
 			return nil
 		}
-		m.dir.files[valueName] = o
+		m.dir.objs[valueName] = Object{Type: OTFile, File: o}
 		return m.commaClose
 	case nullNext:
 		o, err := decodeNull(m.b, valueName, m.modTime)
@@ -481,7 +481,7 @@ func (m *arraySM) valueCheck(ctx context.Context) stateFn {
 			m.err = err
 			return nil
 		}
-		m.dir.files[valueName] = o
+		m.dir.objs[valueName] = Object{Type: OTFile, File: o}
 		return m.commaClose
 	}
 
@@ -766,10 +766,7 @@ func isQuote(b []byte) bool {
 }
 
 func duplicateField(dir Directory, name string) error {
-	if _, ok := dir.dirs[name]; ok {
-		return fmt.Errorf("had duplicate field named %q", name)
-	}
-	if _, ok := dir.files[name]; ok {
+	if _, ok := dir.objs[name]; ok {
 		return fmt.Errorf("had duplicate field named %q", name)
 	}
 	return nil

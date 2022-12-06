@@ -67,26 +67,6 @@ func init() {
 	}
 }
 
-/*
-var diffPool *diffsize.Pool[*[]byte]
-
-func init() {
-	var err error
-	diffPool, err = diffsize.New[*[]byte](
-		diffsize.Sizes{
-			{Size: 4, ConstBuff: 1000, SyncPool: true},
-			{Size: 5, ConstBuff: 1000, SyncPool: true},
-			{Size: 20, ConstBuff: 100, SyncPool: true},
-			{Size: 50, ConstBuff: 100, SyncPool: true},
-			{Size: 100, ConstBuff: 100, SyncPool: true, MaxSize: 200},
-		},
-	)
-	if err != nil {
-		panic(err)
-	}
-}
-*/
-
 // ValueCheck tells what the next JSON value in a *bufio.Reader is.
 func ValueCheck(b *bufio.Reader) (next, error) {
 	SkipSpace(b)

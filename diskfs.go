@@ -15,6 +15,7 @@ var _ FS = DiskFS{}
 // DiskFS provides an FS for OS access.  It will treat everything in the
 // filesystem from the root down as JSON. So directories represent JSON
 // objects or arrays while files represent JSON values.
+// Note: I haven't tested this or done much with this.
 type DiskFS struct {
 	fs *osfs.FS
 }
@@ -120,7 +121,7 @@ func (f DiskFS) Directory(name string) (Directory, error) {
 				if err != nil {
 					return err
 				}
-				subDir.dirs[fileName] = dir
+				subDir.objs[fileName] = Object{Type: OTDir, Dir: dir}
 				return nil
 			}
 			b, err := f.fs.ReadFile(p)
@@ -132,7 +133,7 @@ func (f DiskFS) Directory(name string) (Directory, error) {
 			if err != nil {
 				return err
 			}
-			subDir.files[fileName] = file
+			subDir.objs[fileName] = Object{Type: OTFile, File: file}
 			return nil
 		},
 	)
@@ -148,12 +149,15 @@ func (f DiskFS) WriteDir(path string, Directory) {
 
 func descTree(d Directory, p string) (Directory, error) {
 	sp := strings.Split(p, "/")
-	var ok bool
 	for _, dir := range sp {
-		d, ok = d.dirs[dir]
+		o, ok := d.objs[dir]
 		if !ok {
 			return Directory{}, fmt.Errorf("problem descending to directory %q in %q", dir, p)
 		}
+		if o.Type != OTDir {
+			return Directory{}, fmt.Errorf("problem descending to directory %q in %q: %q is a file", dir, p, dir)
+		}
+		d = o.Dir
 	}
 	return d, nil
 }
